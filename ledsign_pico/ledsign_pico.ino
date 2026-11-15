@@ -1,3 +1,4 @@
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -7,11 +8,14 @@
 // ============================================================
 // CONFIGURATION
 // ============================================================
+
 constexpr uint8_t DISPLAY_WIDTH = 90;
 constexpr uint8_t DISPLAY_HEIGHT = 7;
+
 constexpr unsigned long SCROLL_INTERVAL_MS = 75;
 constexpr unsigned long ACK_TIMEOUT_MS = 300;
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
+
 constexpr uint32_t UART_BAUD = 57600;
 constexpr size_t MAX_MESSAGE_BYTES = 256;
 
@@ -20,21 +24,32 @@ constexpr uint8_t FRAME_START_2 = 0x55;
 constexpr uint8_t FRAME_ACK = 0x06;
 constexpr uint8_t FRAME_NAK = 0x15;
 
+// Piezo connected between GP28 and GND
+constexpr uint8_t PIEZO_PIN = 28;
+constexpr unsigned int BEEP_FREQUENCY = 1200;
+constexpr unsigned int BEEP_DURATION_MS = 150;
+
 const char WIFI_MESSAGE[] = "Connecting to WiFi...";
+
 char message[MAX_MESSAGE_BYTES + 1] =
     "Gå ut och var glad din jävel";
 
 WebServer server(80);
+
 bool webServerStarted = false;
 bool previousWiFiConnected = false;
+
 unsigned long lastWiFiRetry = 0;
 unsigned long lastFrameTime = 0;
+
 int16_t scrollOffset = 0;
 uint8_t frame[DISPLAY_WIDTH];
 
 // ============================================================
-// 5x7 FONT: one column of spacing between characters
+// 5x7 FONT
+// One blank column between characters
 // ============================================================
+
 struct Glyph {
   uint16_t codepoint;
   uint8_t rows[7];
@@ -127,65 +142,115 @@ const Glyph FONT[] = {
   {0x00E5,{4,10,14,1,15,17,15}},  // å
   {0x00E4,{10,0,14,1,15,17,15}},  // ä
   {0x00F6,{10,0,14,17,17,17,14}}, // ö
-  {0x2665,{0,10,21,31,31,14,4}} //♥
+
+  {0x2665,{0,10,21,31,31,14,4}}  // ♥
 };
 
 constexpr size_t FONT_COUNT = sizeof(FONT) / sizeof(FONT[0]);
 
 // ============================================================
+// PIEZO
+// ============================================================
+
+void beep() {
+  // Non-blocking: does not delay display updates.
+  tone(PIEZO_PIN, BEEP_FREQUENCY, BEEP_DURATION_MS);
+}
+
+// ============================================================
 // UTF-8 AND TEXT RENDERING
 // ============================================================
+
 uint16_t nextCodepoint(const char*& text) {
   const uint8_t first = static_cast<uint8_t>(*text++);
-  if (first < 0x80) return first;
 
-  if ((first & 0xE0) == 0xC0 && *text) {
-    const uint8_t second = static_cast<uint8_t>(*text++);
-    return ((first & 0x1F) << 6) | (second & 0x3F);
+  // ASCII
+  if (first < 0x80) {
+    return first;
   }
+
+  // Two-byte UTF-8: å, ä, ö etc.
+  if ((first & 0xE0) == 0xC0 && text[0]) {
+    const uint8_t second =
+        static_cast<uint8_t>(*text++);
+
+    return ((uint16_t)(first & 0x1F) << 6) |
+           (second & 0x3F);
+  }
+
+  // Three-byte UTF-8: ♥ etc.
+  if ((first & 0xF0) == 0xE0 && text[0] && text[1]) {
+    const uint8_t second =
+        static_cast<uint8_t>(*text++);
+    const uint8_t third =
+        static_cast<uint8_t>(*text++);
+
+    return ((uint16_t)(first & 0x0F) << 12) |
+           ((uint16_t)(second & 0x3F) << 6) |
+           (third & 0x3F);
+  }
+
   return '?';
 }
 
 const Glyph* findGlyph(uint16_t codepoint) {
   for (size_t i = 0; i < FONT_COUNT; ++i) {
-    if (FONT[i].codepoint == codepoint) return &FONT[i];
+    if (FONT[i].codepoint == codepoint) {
+      return &FONT[i];
+    }
   }
   return nullptr;
 }
 
 uint16_t countCharacters(const char* text) {
   uint16_t count = 0;
+
   while (*text) {
     nextCodepoint(text);
     ++count;
   }
+
   return count;
 }
 
 const char* getDisplayText() {
-  return WiFi.status() == WL_CONNECTED ? message : WIFI_MESSAGE;
+  return WiFi.status() == WL_CONNECTED
+      ? message
+      : WIFI_MESSAGE;
 }
 
 void setPixel(int16_t x, int8_t y) {
-  if (x < 0 || x >= DISPLAY_WIDTH || y < 0 || y >= DISPLAY_HEIGHT) return;
+  if (x < 0 || x >= DISPLAY_WIDTH ||
+      y < 0 || y >= DISPLAY_HEIGHT) {
+    return;
+  }
+
   frame[x] |= (1 << y);
 }
 
 void drawChar(int16_t x, uint16_t codepoint) {
   const Glyph* glyph = findGlyph(codepoint);
-  if (!glyph) return;
+
+  if (!glyph) {
+    return;
+  }
 
   for (uint8_t row = 0; row < DISPLAY_HEIGHT; ++row) {
     const uint8_t bits = glyph->rows[row];
+
     for (uint8_t col = 0; col < 5; ++col) {
-      if (bits & (1 << (4 - col))) setPixel(x + col, row);
+      if (bits & (1 << (4 - col))) {
+        setPixel(x + col, row);
+      }
     }
   }
 }
 
 void renderFrame(const char* text) {
   memset(frame, 0, sizeof(frame));
+
   int16_t x = DISPLAY_WIDTH - scrollOffset;
+
   while (*text) {
     drawChar(x, nextCodepoint(text));
     x += 6;
@@ -193,11 +258,16 @@ void renderFrame(const char* text) {
 }
 
 // ============================================================
-// UART FRAME TRANSMISSION (UNCHANGED PROTOCOL)
+// UART FRAME TRANSMISSION
+// Protocol unchanged: AA 55 + 90 bytes + XOR checksum
 // ============================================================
+
 bool sendFrame() {
   uint8_t checksum = 0;
-  while (Serial1.available()) Serial1.read();
+
+  while (Serial1.available()) {
+    Serial1.read();
+  }
 
   Serial1.write(FRAME_START_1);
   Serial1.write(FRAME_START_2);
@@ -211,63 +281,183 @@ bool sendFrame() {
   Serial1.flush();
 
   const unsigned long start = millis();
+
   while (millis() - start < ACK_TIMEOUT_MS) {
     if (Serial1.available()) {
       const uint8_t response = Serial1.read();
+
       if (response == FRAME_ACK) return true;
       if (response == FRAME_NAK) return false;
     }
+
     yield();
   }
+
   return false;
 }
 
 // ============================================================
 // REST API
 // ============================================================
+
+// Read a JSON string field, respecting escaped quotes.
+// This is a lightweight parser for our simple API, not a
+// complete JSON implementation.
+bool extractJsonString(
+    const String& body,
+    const char* field,
+    String& result
+) {
+  const String key = String("\"") + field + "\"";
+  const int keyPos = body.indexOf(key);
+
+  if (keyPos < 0) return false;
+
+  const int colon = body.indexOf(':', keyPos + key.length());
+  if (colon < 0) return false;
+
+  int pos = colon + 1;
+
+  while (pos < (int)body.length() &&
+         (body[pos] == ' ' || body[pos] == '\t')) {
+    ++pos;
+  }
+
+  if (pos >= (int)body.length() || body[pos] != '"') {
+    return false;
+  }
+
+  ++pos;
+  result = "";
+
+  while (pos < (int)body.length()) {
+    const char c = body[pos++];
+
+    if (c == '"') {
+      return true;
+    }
+
+    if (c == '\\') {
+      if (pos >= (int)body.length()) return false;
+
+      const char escaped = body[pos++];
+
+      switch (escaped) {
+        case '"':  result += '"'; break;
+        case '\\': result += '\\'; break;
+        case '/':  result += '/'; break;
+        case 'n':  result += '\n'; break;
+        case 'r':  result += '\r'; break;
+        case 't':  result += '\t'; break;
+        default:
+          // Unsupported JSON escape (including \uXXXX).
+          return false;
+      }
+    } else {
+      result += c;
+    }
+
+    if (result.length() > MAX_MESSAGE_BYTES) {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+// Read optional JSON boolean field, e.g. "beep": true.
+bool jsonBooleanTrue(const String& body, const char* field) {
+  const String key = String("\"") + field + "\"";
+  const int keyPos = body.indexOf(key);
+
+  if (keyPos < 0) return false;
+
+  const int colon = body.indexOf(':', keyPos + key.length());
+  if (colon < 0) return false;
+
+  int pos = colon + 1;
+
+  while (pos < (int)body.length() &&
+         (body[pos] == ' ' || body[pos] == '\t')) {
+    ++pos;
+  }
+
+  if (!body.startsWith("true", pos)) return false;
+
+  const int end = pos + 4;
+  return end == (int)body.length() ||
+         body[end] == ',' ||
+         body[end] == '}' ||
+         body[end] == ' ' ||
+         body[end] == '\n';
+}
+
 void handleMessage() {
   if (!server.hasArg("plain")) {
-    server.send(400, "application/json", "{\"error\":\"Missing JSON body\"}");
+    server.send(
+      400,
+      "application/json",
+      "{\"error\":\"Missing JSON body\"}"
+    );
     return;
   }
 
   const String body = server.arg("plain");
-  const int key = body.indexOf("\"text\"");
-  if (key < 0) {
-    server.send(400, "application/json", "{\"error\":\"Expected text field\"}");
+  String newText;
+
+  if (!extractJsonString(body, "text", newText)) {
+    server.send(
+      400,
+      "application/json",
+      "{\"error\":\"Invalid or missing text field\"}"
+    );
     return;
   }
 
-  const int colon = body.indexOf(':', key + 6);
-  const int firstQuote = (colon >= 0) ? body.indexOf('"', colon + 1) : -1;
-  const int lastQuote = body.lastIndexOf('"');
-  if (colon < 0 || firstQuote < 0 || lastQuote <= firstQuote) {
-    server.send(400, "application/json", "{\"error\":\"Expected text field\"}");
+  if (newText.length() == 0 ||
+      newText.length() > MAX_MESSAGE_BYTES) {
+    server.send(
+      400,
+      "application/json",
+      "{\"error\":\"Invalid text length\"}"
+    );
     return;
   }
 
-  const String newText = body.substring(firstQuote + 1, lastQuote);
-  if (newText.length() == 0 || newText.length() > MAX_MESSAGE_BYTES) {
-    server.send(400, "application/json", "{\"error\":\"Invalid text length\"}");
-    return;
-  }
-
+  // Update displayed message
   newText.toCharArray(message, sizeof(message));
   scrollOffset = 0;
-  server.send(200, "application/json", "{\"status\":\"ok\"}");
+
+  // Optional sound notification
+  if (jsonBooleanTrue(body, "beep")) {
+    beep();
+  }
+
+  server.send(
+    200,
+    "application/json",
+    "{\"status\":\"ok\"}"
+  );
 }
 
 void setupWebServer() {
   server.on("/api/message", HTTP_POST, handleMessage);
+
   server.on("/api/health", HTTP_GET, []() {
-    server.send(200, "application/json", "{\"status\":\"ok\"}");
+    server.send(
+      200,
+      "application/json",
+      "{\"status\":\"ok\"}"
+    );
   });
+
   server.begin();
 }
 
 // ============================================================
 // WIFI CONNECTION MANAGEMENT
 // ============================================================
+
 void maintainWiFi() {
   const bool connected = (WiFi.status() == WL_CONNECTED);
 
@@ -283,7 +473,9 @@ void maintainWiFi() {
       Serial.print(WiFi.RSSI());
       Serial.println(" dBm");
     } else {
-      Serial.println("WiFi disconnected. Showing connection message.");
+      Serial.println(
+        "WiFi disconnected. Showing connection message."
+      );
     }
   }
 
@@ -298,7 +490,9 @@ void maintainWiFi() {
 
   if (millis() - lastWiFiRetry >= WIFI_RETRY_INTERVAL_MS) {
     lastWiFiRetry = millis();
+
     Serial.println("Retrying WiFi connection...");
+
     WiFi.disconnect();
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   }
@@ -307,9 +501,15 @@ void maintainWiFi() {
 // ============================================================
 // MAIN
 // ============================================================
+
 void setup() {
   Serial.begin(115200);
 
+  // Piezo
+  pinMode(PIEZO_PIN, OUTPUT);
+  digitalWrite(PIEZO_PIN, LOW);
+
+  // UART to Arduino Micro
   Serial1.setTX(0);  // GP0 -> Micro D0 RX
   Serial1.setRX(1);  // GP1 <- Micro D1 TX
   Serial1.begin(UART_BAUD);
@@ -319,6 +519,7 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
   lastWiFiRetry = millis();
 
   Serial.println("Connecting to WiFi in the background...");
@@ -327,12 +528,17 @@ void setup() {
 void loop() {
   maintainWiFi();
 
-  if (webServerStarted && WiFi.status() == WL_CONNECTED) {
+  if (webServerStarted &&
+      WiFi.status() == WL_CONNECTED) {
     server.handleClient();
   }
 
   const unsigned long now = millis();
-  if (now - lastFrameTime < SCROLL_INTERVAL_MS) return;
+
+  if (now - lastFrameTime < SCROLL_INTERVAL_MS) {
+    return;
+  }
+
   lastFrameTime = now;
 
   const char* displayText = getDisplayText();
@@ -344,6 +550,11 @@ void loop() {
   }
 
   ++scrollOffset;
-  const int16_t textWidth = countCharacters(displayText) * 6;
-  if (scrollOffset >= DISPLAY_WIDTH + textWidth) scrollOffset = 0;
+
+  const int16_t textWidth =
+      countCharacters(displayText) * 6;
+
+  if (scrollOffset >= DISPLAY_WIDTH + textWidth) {
+    scrollOffset = 0;
+  }
 }
