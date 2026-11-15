@@ -22,7 +22,7 @@ constexpr uint8_t FRAME_NAK = 0x15;
 
 const char WIFI_MESSAGE[] = "Connecting to WiFi...";
 char message[MAX_MESSAGE_BYTES + 1] =
-    "HEJ FRÅN VÄXJÖ! ÅÄÖ 0123456789 :) DET FUNKAR";
+    "Gå ut och var glad din jävel";
 
 WebServer server(80);
 bool webServerStarted = false;
@@ -126,7 +126,8 @@ const Glyph FONT[] = {
 
   {0x00E5,{4,10,14,1,15,17,15}},  // å
   {0x00E4,{10,0,14,1,15,17,15}},  // ä
-  {0x00F6,{10,0,14,17,17,17,14}} // ö
+  {0x00F6,{10,0,14,17,17,17,14}}, // ö
+  {0x2665,{0,10,21,31,31,14,4}} //♥
 };
 
 constexpr size_t FONT_COUNT = sizeof(FONT) / sizeof(FONT[0]);
