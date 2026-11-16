@@ -4,6 +4,7 @@
 #include <WebServer.h>
 #include <string.h>
 #include "secrets.h"
+#include "hardware/watchdog.h"
 
 // ============================================================
 // CONFIGURATION
@@ -44,6 +45,8 @@ unsigned long lastFrameTime = 0;
 
 int16_t scrollOffset = 0;
 uint8_t frame[DISPLAY_WIDTH];
+
+bool lastRebootWasWatchdog = false;
 
 // ============================================================
 // 5x7 FONT
@@ -444,11 +447,14 @@ void setupWebServer() {
   server.on("/api/message", HTTP_POST, handleMessage);
 
   server.on("/api/health", HTTP_GET, []() {
-    server.send(
-      200,
-      "application/json",
-      "{\"status\":\"ok\"}"
-    );
+      String json = "{";
+      json += "\"status\":\"ok\",";
+      json += "\"uptime_seconds\":" + String(millis() / 1000);
+      json += ",\"watchdog_reboot\":";
+      json += lastRebootWasWatchdog ? "true" : "false";
+      json += "}";
+
+      server.send(200, "application/json", json);
   });
 
   server.begin();
@@ -503,6 +509,7 @@ void maintainWiFi() {
 // ============================================================
 
 void setup() {
+  lastRebootWasWatchdog = watchdog_caused_reboot();
   Serial.begin(115200);
 
   // Piezo
