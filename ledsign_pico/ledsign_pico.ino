@@ -525,6 +525,7 @@ void setup() {
   Serial.println("Pico W LED Sign starting...");
 
   WiFi.mode(WIFI_STA);
+  WiFi.noLowPowerMode();
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   lastWiFiRetry = millis();
