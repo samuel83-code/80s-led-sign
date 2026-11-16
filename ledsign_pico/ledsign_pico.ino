@@ -17,6 +17,25 @@ constexpr unsigned long SCROLL_INTERVAL_MS = 75;
 constexpr unsigned long ACK_TIMEOUT_MS = 300;
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
 
+
+constexpr unsigned long WIFI_CHECK_INTERVAL_MS = 30000;
+constexpr uint8_t WIFI_MAX_FAILURES = 3;
+
+// Ändra porten om routerns webbgränssnitt använder HTTPS (443).
+constexpr uint16_t ROUTER_TEST_PORT = 80;
+
+unsigned long lastWiFiCheck = 0;
+unsigned long lastWiFiRecovery = 0;
+
+uint32_t wifiCheckSuccesses = 0;
+uint32_t wifiCheckFailures = 0;
+uint32_t wifiForcedReconnects = 0;
+uint8_t consecutiveWiFiFailures = 0;
+
+bool lastWiFiCheckOK = true;
+
+
+
 constexpr uint32_t UART_BAUD = 57600;
 constexpr size_t MAX_MESSAGE_BYTES = 256;
 
@@ -150,6 +169,62 @@ const Glyph FONT[] = {
 };
 
 constexpr size_t FONT_COUNT = sizeof(FONT) / sizeof(FONT[0]);
+
+
+
+void checkWiFiConnection() {
+  const unsigned long now = millis();
+
+  if (now - lastWiFiCheck < WIFI_CHECK_INTERVAL_MS) {
+    return;
+  }
+
+  lastWiFiCheck = now;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    consecutiveWiFiFailures = 0;
+    return; // maintainWiFi() handles normal disconnections.
+  }
+
+  WiFiClient client;
+  IPAddress gateway = WiFi.gatewayIP();
+
+  // Actual TCP connection test, not just WiFi.status().
+  bool success = client.connect(gateway, ROUTER_TEST_PORT);
+  client.stop();
+
+  lastWiFiCheckOK = success;
+
+  if (success) {
+    wifiCheckSuccesses++;
+    consecutiveWiFiFailures = 0;
+    return;
+  }
+
+  wifiCheckFailures++;
+  consecutiveWiFiFailures++;
+
+  Serial.printf(
+    "WiFi connectivity test failed (%u/%u)\n",
+    consecutiveWiFiFailures,
+    WIFI_MAX_FAILURES
+  );
+
+  if (consecutiveWiFiFailures >= WIFI_MAX_FAILURES) {
+    Serial.println("WiFi appears stuck. Forcing reconnect...");
+
+    wifiForcedReconnects++;
+    lastWiFiRecovery = millis();
+    consecutiveWiFiFailures = 0;
+
+    WiFi.disconnect();
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    // Let maintainWiFi() handle subsequent retries.
+    lastWiFiRetry = millis();
+  }
+}
+
 
 // ============================================================
 // PIEZO
@@ -446,16 +521,27 @@ void handleMessage() {
 void setupWebServer() {
   server.on("/api/message", HTTP_POST, handleMessage);
 
+  
   server.on("/api/health", HTTP_GET, []() {
-      String json = "{";
-      json += "\"status\":\"ok\",";
-      json += "\"uptime_seconds\":" + String(millis() / 1000);
-      json += ",\"watchdog_reboot\":";
-      json += lastRebootWasWatchdog ? "true" : "false";
-      json += "}";
+    String json = "{";
+    json += "\"status\":\"ok\",";
+    json += "\"uptime_seconds\":" + String(millis() / 1000) + ",";
+    json += "\"watchdog_reboot\":";
+    json += lastRebootWasWatchdog ? "true," : "false,";
+    json += "\"wifi_status\":" + String(WiFi.status()) + ",";
+    json += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
+    json += "\"wifi_ip\":\"" + WiFi.localIP().toString() + "\",";
+    json += "\"wifi_check_ok\":";
+    json += lastWiFiCheckOK ? "true," : "false,";
+    json += "\"wifi_check_successes\":" + String(wifiCheckSuccesses) + ",";
+    json += "\"wifi_check_failures\":" + String(wifiCheckFailures) + ",";
+    json += "\"wifi_forced_reconnects\":" + String(wifiForcedReconnects) + ",";
+    json += "\"last_wifi_recovery_seconds\":" + String(lastWiFiRecovery / 1000);
+    json += "}";
 
-      server.send(200, "application/json", json);
+    server.send(200, "application/json", json);
   });
+
 
   server.begin();
 }
@@ -535,6 +621,7 @@ void setup() {
 
 void loop() {
   maintainWiFi();
+   checkWiFiConnection();
 
   if (webServerStarted &&
       WiFi.status() == WL_CONNECTED) {
