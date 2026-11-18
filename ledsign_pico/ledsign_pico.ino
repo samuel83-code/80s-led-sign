@@ -17,16 +17,25 @@ constexpr unsigned long SCROLL_INTERVAL_MS = 75;
 unsigned long scrollIntervalMs = SCROLL_INTERVAL_MS;
 
 constexpr unsigned long FLASH_INTERVAL_MS = 500;
+constexpr unsigned long JUMP_INTERVAL_MS = 60;
 
 enum class Effect {
   SCROLL,
-  FLASH
+  FLASH,
+  JUMP
 };
+
 
 Effect currentEffect = Effect::SCROLL;
 
 unsigned long lastFlashTime = 0;
 bool flashVisible = true;
+
+int8_t jumpOffsetY = -6;
+unsigned long lastJumpTime = 0;
+bool jumpFramePending = false;
+
+
 
 constexpr unsigned long ACK_TIMEOUT_MS = 300;
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
@@ -434,6 +443,49 @@ void renderFrame(const char* text) {
   }
 }
 
+void drawCharWithOffset(
+    int16_t x,
+    int8_t offsetY,
+    uint16_t codepoint
+) {
+  const Glyph* glyph = findGlyph(codepoint);
+
+  if (!glyph) {
+    return;
+  }
+
+  for (uint8_t row = 0; row < DISPLAY_HEIGHT; ++row) {
+    const uint8_t bits = glyph->rows[row];
+
+    for (uint8_t col = 0; col < 5; ++col) {
+      if (bits & (1 << (4 - col))) {
+        setPixel(x + col, row + offsetY);
+      }
+    }
+  }
+}
+
+void renderJumpFrame(const char* text, int8_t offsetY) {
+  memset(frame, 0, sizeof(frame));
+
+  const int32_t textWidth =
+      static_cast<int32_t>(countCharacters(text)) * 6 - 1;
+
+  const int32_t startX = (DISPLAY_WIDTH - textWidth) / 2;
+
+  int32_t x = startX;
+
+  while (*text) {
+    drawCharWithOffset(
+        static_cast<int16_t>(x),
+        offsetY,
+        nextCodepoint(text)
+    );
+
+    x += 6;
+  }
+}
+
 // ============================================================
 // UART FRAME TRANSMISSION
 // Protocol unchanged: AA 55 + 90 bytes + XOR checksum
@@ -613,6 +665,8 @@ void handleMessage() {
     newEffect = Effect::SCROLL;
   } else if (effectName == "flash") {
     newEffect = Effect::FLASH;
+  } else if (effectName == "jump") {
+    newEffect = Effect::JUMP;
   } else {
     server.send(
       400,
@@ -622,7 +676,8 @@ void handleMessage() {
     return;
   }
 
-  if (newEffect == Effect::FLASH &&
+ if ((newEffect == Effect::FLASH ||
+     newEffect == Effect::JUMP) &&
       static_cast<int32_t>(countCharacters(newText.c_str())) * 6 - 1
           > DISPLAY_WIDTH) {
     server.send(
@@ -641,6 +696,10 @@ void handleMessage() {
   flashVisible = true;
   lastFlashTime = millis();
   lastFrameTime = 0;
+
+  jumpOffsetY = -6;
+  lastJumpTime = millis();
+  jumpFramePending = true;
 
   // Optional sound notification
   if (jsonBooleanTrue(body, "beep")) {
@@ -882,8 +941,33 @@ void loop() {
     }
 
     return;
-  }
+    }
+    if (activeEffect == Effect::JUMP) {
 
+    // Move the text down one pixel at a time.
+    if (jumpOffsetY < 0 &&
+        now - lastJumpTime >= JUMP_INTERVAL_MS) {
+
+      ++jumpOffsetY;
+      lastJumpTime = now;
+      jumpFramePending = true;
+    }
+
+    // Send only when the image has changed.
+    // Retry the same frame if UART transmission fails.
+    if (jumpFramePending) {
+
+      renderJumpFrame(displayText, jumpOffsetY);
+
+      if (sendFrame()) {
+        jumpFramePending = false;
+      } else {
+        Serial.println("Jump frame failed");
+      }
+    }
+
+    return;
+  }
   // Existing scrolling behavior.
   if (now - lastFrameTime < scrollIntervalMs) {
     return;
