@@ -14,6 +14,7 @@ constexpr uint8_t DISPLAY_WIDTH = 90;
 constexpr uint8_t DISPLAY_HEIGHT = 7;
 
 constexpr unsigned long SCROLL_INTERVAL_MS = 75;
+unsigned long scrollIntervalMs = SCROLL_INTERVAL_MS;
 constexpr unsigned long ACK_TIMEOUT_MS = 300;
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
 
@@ -543,6 +544,86 @@ void setupWebServer() {
   });
 
 
+  server.on("/api/config", HTTP_GET, []() {
+    String json = "{\"scroll_interval_ms\":";
+    json += String(scrollIntervalMs);
+    json += "}";
+
+    server.send(200, "application/json", json);
+  });
+
+  server.on("/api/config", HTTP_PATCH, []() {
+    if (!server.hasArg("plain")) {
+      server.send(400, "application/json",
+                  "{\"error\":\"Missing JSON body\"}");
+      return;
+    }
+
+    String body = server.arg("plain");
+
+    // Accept only a JSON object containing scroll_interval_ms.
+    int keyPos = body.indexOf("\"scroll_interval_ms\"");
+    if (keyPos < 0) {
+      server.send(400, "application/json",
+                  "{\"error\":\"Missing scroll_interval_ms\"}");
+      return;
+    }
+
+    int colon = body.indexOf(':', keyPos);
+    if (colon < 0) {
+      server.send(400, "application/json",
+                  "{\"error\":\"Invalid JSON\"}");
+      return;
+    }
+
+    String value = body.substring(colon + 1);
+    value.trim();
+
+    // Remove the closing brace and surrounding whitespace.
+    int end = value.indexOf('}');
+    if (end < 0) {
+      server.send(400, "application/json",
+                  "{\"error\":\"Invalid JSON\"}");
+      return;
+    }
+
+    value = value.substring(0, end);
+    value.trim();
+
+    // Require a positive integer.
+    if (value.length() == 0) {
+      server.send(400, "application/json",
+                  "{\"error\":\"Invalid interval\"}");
+      return;
+    }
+
+    for (unsigned int i = 0; i < value.length(); i++) {
+      if (value[i] < '0' || value[i] > '9') {
+        server.send(400, "application/json",
+                    "{\"error\":\"Interval must be an integer\"}");
+        return;
+      }
+    }
+
+    unsigned long interval = value.toInt();
+
+    if (interval < 20 || interval > 1000) {
+      server.send(400, "application/json",
+                  "{\"error\":\"Interval must be 20-1000 ms\"}");
+      return;
+    }
+
+    scrollIntervalMs = interval;
+
+    String json = "{\"scroll_interval_ms\":";
+    json += String(scrollIntervalMs);
+    json += "}";
+
+    server.send(200, "application/json", json);
+  });
+
+
+
   server.begin();
 }
 
@@ -630,7 +711,7 @@ void loop() {
 
   const unsigned long now = millis();
 
-  if (now - lastFrameTime < SCROLL_INTERVAL_MS) {
+  if (now - lastFrameTime < scrollIntervalMs) {
     return;
   }
 
