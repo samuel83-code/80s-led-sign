@@ -15,6 +15,19 @@ constexpr uint8_t DISPLAY_HEIGHT = 7;
 
 constexpr unsigned long SCROLL_INTERVAL_MS = 75;
 unsigned long scrollIntervalMs = SCROLL_INTERVAL_MS;
+
+constexpr unsigned long FLASH_INTERVAL_MS = 500;
+
+enum class Effect {
+  SCROLL,
+  FLASH
+};
+
+Effect currentEffect = Effect::SCROLL;
+
+unsigned long lastFlashTime = 0;
+bool flashVisible = true;
+
 constexpr unsigned long ACK_TIMEOUT_MS = 300;
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
 
@@ -242,7 +255,21 @@ const Glyph FONT[] = {
 
 constexpr size_t FONT_COUNT = sizeof(FONT) / sizeof(FONT[0]);
 
+void renderStaticFrame(const char* text) {
+  memset(frame, 0, sizeof(frame));
 
+  const int32_t textWidth =
+      static_cast<int32_t>(countCharacters(text)) * 6 - 1;
+
+  const int32_t startX = (DISPLAY_WIDTH - textWidth) / 2;
+
+  int32_t x = startX;
+
+  while (*text) {
+    drawChar(static_cast<int16_t>(x), nextCodepoint(text));
+    x += 6;
+  }
+}
 
 void checkWiFiConnection() {
   const unsigned long now = millis();
@@ -573,10 +600,47 @@ void handleMessage() {
     );
     return;
   }
+  String effectName = "scroll";
+  String requestedEffect;
 
+  if (extractJsonString(body, "effect", requestedEffect)) {
+    effectName = requestedEffect;
+  }
+
+  Effect newEffect;
+
+  if (effectName == "scroll") {
+    newEffect = Effect::SCROLL;
+  } else if (effectName == "flash") {
+    newEffect = Effect::FLASH;
+  } else {
+    server.send(
+      400,
+      "application/json",
+      "{\"error\":\"Unknown effect\"}"
+    );
+    return;
+  }
+
+  if (newEffect == Effect::FLASH &&
+      static_cast<int32_t>(countCharacters(newText.c_str())) * 6 - 1
+          > DISPLAY_WIDTH) {
+    server.send(
+      400,
+      "application/json",
+      "{\"error\":\"Text too long for flash\"}"
+    );
+    return;
+  }
   // Update displayed message
   newText.toCharArray(message, sizeof(message));
+
+  currentEffect = newEffect;
   scrollOffset = 0;
+
+  flashVisible = true;
+  lastFlashTime = millis();
+  lastFrameTime = 0;
 
   // Optional sound notification
   if (jsonBooleanTrue(body, "beep")) {
@@ -773,7 +837,7 @@ void setup() {
 
 void loop() {
   maintainWiFi();
-   checkWiFiConnection();
+  checkWiFiConnection();
 
   if (webServerStarted &&
       WiFi.status() == WL_CONNECTED) {
@@ -781,14 +845,52 @@ void loop() {
   }
 
   const unsigned long now = millis();
+  const char* displayText = getDisplayText();
 
+  // Show WiFi connection message using normal scrolling.
+  const Effect activeEffect =
+      WiFi.status() == WL_CONNECTED
+          ? currentEffect
+          : Effect::SCROLL;
+
+  if (activeEffect == Effect::FLASH) {
+
+    // Alternate between visible and invisible text.
+    if (now - lastFlashTime >= FLASH_INTERVAL_MS) {
+      lastFlashTime = now;
+      flashVisible = !flashVisible;
+    }
+
+    // Only transmit when the display state changes,
+    // or when a new message has been received.
+    if (lastFrameTime != 0 &&
+        now - lastFrameTime < FLASH_INTERVAL_MS &&
+        lastFrameTime >= lastFlashTime) {
+      return;
+    }
+
+    if (flashVisible) {
+      renderStaticFrame(displayText);
+    } else {
+      memset(frame, 0, sizeof(frame));
+    }
+
+    if (sendFrame()) {
+      lastFrameTime = millis();
+    } else {
+      Serial.println("Flash frame failed");
+    }
+
+    return;
+  }
+
+  // Existing scrolling behavior.
   if (now - lastFrameTime < scrollIntervalMs) {
     return;
   }
 
   lastFrameTime = now;
 
-  const char* displayText = getDisplayText();
   renderFrame(displayText);
 
   if (!sendFrame()) {
@@ -798,8 +900,8 @@ void loop() {
 
   ++scrollOffset;
 
-  const int16_t textWidth =
-      countCharacters(displayText) * 6;
+  const int32_t textWidth =
+      static_cast<int32_t>(countCharacters(displayText)) * 6;
 
   if (scrollOffset >= DISPLAY_WIDTH + textWidth) {
     scrollOffset = 0;
